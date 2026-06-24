@@ -1,0 +1,585 @@
+desc:ReaAutoMIDITune - MIDI Key Snap
+tags: MIDI pitch correction key scale
+author: FalconEYE Software Dev
+version: 1.0.1
+
+// ============================================================
+//  ReaAutoMIDITune v1.0.1
+//  Real-time MIDI note snapping to user-selected key/scale.
+//  Incoming notes outside the key are transparently remapped
+//  to the nearest in-scale pitch before being forwarded.
+// ============================================================
+
+// ---- Sliders -----------------------------------------------
+// Root note: 0=C, 1=C#/Db, 2=D, 3=D#/Eb, 4=E, 5=F,
+//            6=F#/Gb, 7=G, 8=G#/Ab, 9=A, 10=A#/Bb, 11=B
+slider1:0<0,11,1{C,C#/Db,D,D#/Eb,E,F,F#/Gb,G,G#/Ab,A,A#/Bb,B}>Root Note
+
+// Scale / Mode
+// 0=Major 1=Natural Minor 2=Harmonic Minor 3=Melodic Minor
+// 4=Dorian 5=Phrygian 6=Lydian 7=Mixolydian 8=Locrian
+// 9=Pentatonic Major 10=Pentatonic Minor 11=Blues
+// 12=Whole Tone 13=Diminished (WH) 14=Chromatic (bypass)
+slider2:0<0,14,1{Major,Natural Minor,Harmonic Minor,Melodic Minor,Dorian,Phrygian,Lydian,Mixolydian,Locrian,Pentatonic Major,Pentatonic Minor,Blues,Whole Tone,Diminished (WH),Chromatic (bypass)}>Scale / Mode
+
+// Snap direction: 0=Nearest, 1=Always Up, 2=Always Down
+slider3:0<0,2,1{Nearest,Always Up,Always Down}>Snap Direction
+
+// MIDI channel filter: 0=All Channels, 1-16=specific channel
+slider4:0<0,16,1{All,Ch 1,Ch 2,Ch 3,Ch 4,Ch 5,Ch 6,Ch 7,Ch 8,Ch 9,Ch 10,Ch 11,Ch 12,Ch 13,Ch 14,Ch 15,Ch 16}>MIDI Channel Filter
+
+// Bypass toggle
+slider5:0<0,1,1{Active,Bypassed}>Plugin State
+
+// Snap Range: 0=Full octave snap, 1-12 = max semitones to snap (0=unlimited)
+slider6:0<0,12,1>Max Snap Distance (semitones, 0=unlimited)
+
+// Note display (read-only feedback) - last incoming note MIDI number
+slider7:0<0,127,1>Last Note In (read-only)
+
+// Snapped note display (read-only feedback)
+slider8:0<0,127,1>Last Note Out (read-only)
+
+// ---- Initialise Memory Layout ------------------------------
+// Scale interval tables stored in gmem-style fixed array using
+// local memory slots (mem[]).
+// mem[0..13]   = number of intervals for each scale (14 scales)
+// mem[100..199] = interval data (up to 12 per scale, row-major)
+//                 scale S, step I => mem[100 + S*12 + I]
+
+@init
+
+// Helpers
+function load_scales() local(b) (
+  // ---- interval counts ----
+  mem[0]  = 7;   // Major
+  mem[1]  = 7;   // Natural Minor
+  mem[2]  = 7;   // Harmonic Minor
+  mem[3]  = 7;   // Melodic Minor (ascending)
+  mem[4]  = 7;   // Dorian
+  mem[5]  = 7;   // Phrygian
+  mem[6]  = 7;   // Lydian
+  mem[7]  = 7;   // Mixolydian
+  mem[8]  = 7;   // Locrian
+  mem[9]  = 5;   // Pentatonic Major
+  mem[10] = 5;   // Pentatonic Minor
+  mem[11] = 6;   // Blues
+  mem[12] = 6;   // Whole Tone
+  mem[13] = 8;   // Diminished (WH)
+  // mem[14] = 12  Chromatic — handled as bypass in code
+
+  // ---- Major: 0 2 4 5 7 9 11 ----
+  b = 100 + 0*12;
+  mem[b+0]=0; mem[b+1]=2; mem[b+2]=4; mem[b+3]=5;
+  mem[b+4]=7; mem[b+5]=9; mem[b+6]=11;
+
+  // ---- Natural Minor: 0 2 3 5 7 8 10 ----
+  b = 100 + 1*12;
+  mem[b+0]=0; mem[b+1]=2; mem[b+2]=3; mem[b+3]=5;
+  mem[b+4]=7; mem[b+5]=8; mem[b+6]=10;
+
+  // ---- Harmonic Minor: 0 2 3 5 7 8 11 ----
+  b = 100 + 2*12;
+  mem[b+0]=0; mem[b+1]=2; mem[b+2]=3; mem[b+3]=5;
+  mem[b+4]=7; mem[b+5]=8; mem[b+6]=11;
+
+  // ---- Melodic Minor (asc): 0 2 3 5 7 9 11 ----
+  b = 100 + 3*12;
+  mem[b+0]=0; mem[b+1]=2; mem[b+2]=3; mem[b+3]=5;
+  mem[b+4]=7; mem[b+5]=9; mem[b+6]=11;
+
+  // ---- Dorian: 0 2 3 5 7 9 10 ----
+  b = 100 + 4*12;
+  mem[b+0]=0; mem[b+1]=2; mem[b+2]=3; mem[b+3]=5;
+  mem[b+4]=7; mem[b+5]=9; mem[b+6]=10;
+
+  // ---- Phrygian: 0 1 3 5 7 8 10 ----
+  b = 100 + 5*12;
+  mem[b+0]=0; mem[b+1]=1; mem[b+2]=3; mem[b+3]=5;
+  mem[b+4]=7; mem[b+5]=8; mem[b+6]=10;
+
+  // ---- Lydian: 0 2 4 6 7 9 11 ----
+  b = 100 + 6*12;
+  mem[b+0]=0; mem[b+1]=2; mem[b+2]=4; mem[b+3]=6;
+  mem[b+4]=7; mem[b+5]=9; mem[b+6]=11;
+
+  // ---- Mixolydian: 0 2 4 5 7 9 10 ----
+  b = 100 + 7*12;
+  mem[b+0]=0; mem[b+1]=2; mem[b+2]=4; mem[b+3]=5;
+  mem[b+4]=7; mem[b+5]=9; mem[b+6]=10;
+
+  // ---- Locrian: 0 1 3 5 6 8 10 ----
+  b = 100 + 8*12;
+  mem[b+0]=0; mem[b+1]=1; mem[b+2]=3; mem[b+3]=5;
+  mem[b+4]=6; mem[b+5]=8; mem[b+6]=10;
+
+  // ---- Pentatonic Major: 0 2 4 7 9 ----
+  b = 100 + 9*12;
+  mem[b+0]=0; mem[b+1]=2; mem[b+2]=4; mem[b+3]=7; mem[b+4]=9;
+
+  // ---- Pentatonic Minor: 0 3 5 7 10 ----
+  b = 100 + 10*12;
+  mem[b+0]=0; mem[b+1]=3; mem[b+2]=5; mem[b+3]=7; mem[b+4]=10;
+
+  // ---- Blues: 0 3 5 6 7 10 ----
+  b = 100 + 11*12;
+  mem[b+0]=0; mem[b+1]=3; mem[b+2]=5; mem[b+3]=6; mem[b+4]=7; mem[b+5]=10;
+
+  // ---- Whole Tone: 0 2 4 6 8 10 ----
+  b = 100 + 12*12;
+  mem[b+0]=0; mem[b+1]=2; mem[b+2]=4; mem[b+3]=6; mem[b+4]=8; mem[b+5]=10;
+
+  // ---- Diminished (WH): 0 2 3 5 6 8 9 11 ----
+  b = 100 + 13*12;
+  mem[b+0]=0; mem[b+1]=2; mem[b+2]=3; mem[b+3]=5;
+  mem[b+4]=6; mem[b+5]=8; mem[b+6]=9; mem[b+7]=11;
+);
+
+load_scales();
+
+// Active note tracking: mem[500..627] = 128 slots for channel remapping
+// mem[500 + orig_note] = snapped note (-1 if not active)
+function init_note_map() local(i) (
+  i = 0;
+  loop(128,
+    mem[500 + i] = -1;
+    i += 1;
+  );
+);
+init_note_map();
+
+// ---- Snap engine -------------------------------------------
+// Returns the nearest in-scale note to raw_note given root & scale.
+// Respects snap_dir: 0=nearest, 1=up, 2=down.
+// max_dist: 0=unlimited, else pass original if > max_dist semitones away.
+//
+// FIX (v1.0.1): Use absolute MIDI octave (floor(raw_note/12)) rather than
+// a root-relative octave.  The old formula (+1200 offset) inflated octave
+// to ~99 for very low notes with a high root (e.g. note=0, root=B=11),
+// producing candidates like 1199 before clamping and corrupting distance
+// comparisons.  Absolute octave keeps every candidate within MIDI 0-127.
+function snap_note(raw_note, root, scale_idx, snap_dir, max_dist)
+  local(abs_oct, pc, n_steps, base, best_note, best_dist,
+        candidate_note, dist, i, step, o) (
+
+  // Chromatic bypass
+  scale_idx == 14 ? (
+    best_note = raw_note;
+  ) : (
+    // Absolute MIDI octave of the raw note
+    abs_oct = floor(raw_note / 12);
+
+    // Pitch class of the raw note relative to root (0-11)
+    pc = (raw_note - root + 120) % 12;
+
+    n_steps = mem[scale_idx];
+    base = 100 + scale_idx * 12;
+
+    // Check if note is already in scale
+    i = 0;
+    best_note = -1;
+    loop(n_steps,
+      mem[base + i] == pc ? (
+        best_note = raw_note;
+      );
+      i += 1;
+    );
+
+    best_note == -1 ? (
+      // Not in scale — need to snap
+      snap_dir == 0 ? (
+        // Nearest: search scale tones in abs_oct-1, abs_oct, abs_oct+1
+        best_dist = 999;
+        i = 0;
+        loop(n_steps,
+          step = mem[base + i];
+          o = abs_oct - 1;
+          loop(3,
+            // Candidate: find the octave that places (root + step) nearest the
+            // raw note.  We anchor on the root's position in that octave.
+            candidate_note = root + o * 12 + step;
+            // Adjust so candidate sits in the right chromatic position
+            candidate_note >= 0 && candidate_note <= 127 ? (
+              dist = abs(candidate_note - raw_note);
+              dist < best_dist ? (
+                best_dist = dist;
+                best_note = candidate_note;
+              );
+            );
+            o += 1;
+          );
+          i += 1;
+        );
+      ) : snap_dir == 1 ? (
+        // Always Up: nearest scale tone >= raw_note
+        best_dist = 999;
+        best_note = -1;
+        i = 0;
+        loop(n_steps,
+          step = mem[base + i];
+          // Try abs_oct and abs_oct+1 to find first >= raw_note
+          o = abs_oct;
+          loop(2,
+            candidate_note = root + o * 12 + step;
+            candidate_note >= raw_note && candidate_note <= 127 ? (
+              dist = candidate_note - raw_note;
+              dist < best_dist ? (
+                best_dist = dist;
+                best_note = candidate_note;
+              );
+            );
+            o += 1;
+          );
+          i += 1;
+        );
+        best_note == -1 ? best_note = raw_note; // fallback: no in-scale note above
+      ) : (
+        // Always Down: nearest scale tone <= raw_note
+        best_dist = 999;
+        best_note = -1;
+        i = 0;
+        loop(n_steps,
+          step = mem[base + i];
+          // Try abs_oct and abs_oct-1 to find last <= raw_note
+          o = abs_oct;
+          loop(2,
+            candidate_note = root + o * 12 + step;
+            candidate_note <= raw_note && candidate_note >= 0 ? (
+              dist = raw_note - candidate_note;
+              dist < best_dist ? (
+                best_dist = dist;
+                best_note = candidate_note;
+              );
+            );
+            o -= 1;
+          );
+          i += 1;
+        );
+        best_note == -1 ? best_note = raw_note; // fallback: no in-scale note below
+      );
+
+      // Max snap distance guard
+      max_dist > 0 ? (
+        abs(best_note - raw_note) > max_dist ? (
+          best_note = raw_note;
+        );
+      );
+    );
+
+    // Clamp to valid MIDI range (belt-and-suspenders)
+    best_note < 0   ? best_note = 0;
+    best_note > 127 ? best_note = 127;
+  );
+
+  best_note;
+);
+
+// ---- Block processing --------------------------------------
+@block
+
+// Cache slider values once per block, not per message
+s_root    = floor(slider1 + 0.5);
+s_scale   = floor(slider2 + 0.5);
+s_dir     = floor(slider3 + 0.5);
+s_ch_filt = floor(slider4 + 0.5);
+s_bypass  = floor(slider5 + 0.5);
+s_maxdist = floor(slider6 + 0.5);
+
+while (midirecv(offset, msg1, msg2, msg3)) (
+
+  status  = msg1 & $xF0;
+  channel = msg1 & $x0F; // 0-based
+
+  // Channel filter check (slider4=0 means all channels)
+  ch_ok = (s_ch_filt == 0) || (channel == (s_ch_filt - 1));
+
+  s_bypass || !ch_ok ? (
+    // Bypass or wrong channel — pass through unchanged
+    midisend(offset, msg1, msg2, msg3);
+  ) : (
+    // Note On (with velocity > 0) — snap and remap
+    (status == $x90 && msg3 > 0) ? (
+      raw_note = msg2;
+      snapped  = snap_note(raw_note, s_root, s_scale, s_dir, s_maxdist);
+
+      // Store mapping so Note Off can follow the same pitch
+      mem[500 + raw_note] = snapped;
+
+      // Update display sliders
+      slider7 = raw_note;
+      slider8 = snapped;
+      sliderchange(slider7);
+      sliderchange(slider8);
+
+      midisend(offset, msg1, snapped, msg3);
+
+    ) : (status == $x80 || (status == $x90 && msg3 == 0)) ? (
+      // Note Off — resolve through stored map so we release the right pitch
+      raw_note = msg2;
+      stored   = mem[500 + raw_note];
+      stored   = (stored < 0) ? raw_note : stored;
+      mem[500 + raw_note] = -1; // clear slot
+
+      midisend(offset, msg1, stored, msg3);
+
+    ) : (
+      // All other MIDI (CC, pitch bend, aftertouch, PC, etc.) — pass through
+      midisend(offset, msg1, msg2, msg3);
+    );
+  );
+);
+
+// ---- Graphics / UI -----------------------------------------
+@gfx 560 320
+
+// ---- colour palette ----
+function set_col_bg()    ( gfx_r=0.09; gfx_g=0.10; gfx_b=0.13; gfx_a=1; );
+function set_col_panel() ( gfx_r=0.13; gfx_g=0.15; gfx_b=0.20; gfx_a=1; );
+function set_col_accent()(gfx_r=0.27; gfx_g=0.69; gfx_b=0.96; gfx_a=1; );
+function set_col_green() ( gfx_r=0.22; gfx_g=0.82; gfx_b=0.50; gfx_a=1; );
+function set_col_red()   ( gfx_r=0.95; gfx_g=0.30; gfx_b=0.30; gfx_a=1; );
+function set_col_text()  ( gfx_r=0.90; gfx_g=0.92; gfx_b=0.95; gfx_a=1; );
+function set_col_dim()   ( gfx_r=0.45; gfx_g=0.48; gfx_b=0.54; gfx_a=1; );
+
+W = gfx_w; H = gfx_h;
+
+// Background
+set_col_bg();
+gfx_rect(0, 0, W, H);
+
+// ---- Header bar ----
+set_col_panel();
+gfx_rect(0, 0, W, 48);
+set_col_accent();
+gfx_rect(0, 44, W, 4);
+
+gfx_setfont(1, "Arial", 22, 'b');
+set_col_accent();
+gfx_x = 16; gfx_y = 10;
+gfx_drawstr("ReaAutoMIDITune");
+
+gfx_setfont(1, "Arial", 11, 0);
+set_col_dim();
+gfx_x = 220; gfx_y = 18;
+gfx_drawstr("MIDI Key-Snap by FalconEYE  v1.0");
+
+// Bypass indicator top-right
+bypass_now = floor(slider5 + 0.5);
+bypass_now ? set_col_red() : set_col_green();
+gfx_rect(W - 110, 12, 98, 24, 1);
+gfx_setfont(1, "Arial", 12, 'b');
+set_col_bg();
+gfx_x = W - 95; gfx_y = 17;
+bypass_now ? gfx_drawstr("BYPASSED") : gfx_drawstr(" ACTIVE ");
+
+// ---- Piano keyboard visualisation -------------------------
+// Show one octave (C..B) with current scale highlighted
+
+piano_x = 16;
+piano_y = 62;
+piano_w = W - 32;
+piano_h = 100;
+
+root_now  = floor(slider1 + 0.5);
+scale_now = floor(slider2 + 0.5);
+n_steps_v = (scale_now <= 13) ? mem[scale_now] : 12;
+
+// Build scale membership lookup for display (12 slots)
+i = 0;
+loop(12, mem[700 + i] = 0; i += 1;);
+scale_now == 14 ? (
+  // Chromatic — all on
+  i = 0; loop(12, mem[700+i]=1; i+=1;);
+) : (
+  base_v = 100 + scale_now * 12;
+  i = 0;
+  loop(n_steps_v,
+    mem[700 + mem[base_v + i]] = 1;
+    i += 1;
+  );
+);
+
+// White key positions (C=0,D=2,E=4,F=5,G=7,A=9,B=11)
+white_keys = 7;
+wk_w = floor(piano_w / white_keys);
+wk_h = piano_h;
+
+// Map white key index to pitch class
+function white_pc(wi) (
+  wi == 0 ? 0 :
+  wi == 1 ? 2 :
+  wi == 2 ? 4 :
+  wi == 3 ? 5 :
+  wi == 4 ? 7 :
+  wi == 5 ? 9 :
+             11;
+);
+
+// Draw white keys
+i = 0;
+loop(white_keys,
+  pc = white_pc(i);
+  kx = piano_x + i * wk_w;
+
+  in_scale_v = mem[700 + ((pc + root_now) % 12)];
+  is_root_v  = (pc == 0); // root at pc=0 relative
+
+  in_scale_v && is_root_v ? (
+    // Root note — vivid accent
+    set_col_accent();
+  ) : in_scale_v ? (
+    gfx_r=0.78; gfx_g=0.92; gfx_b=0.78; gfx_a=1;
+  ) : (
+    gfx_r=0.94; gfx_g=0.94; gfx_b=0.96; gfx_a=1;
+  );
+  gfx_rect(kx+1, piano_y, wk_w-2, wk_h-1);
+
+  // Border
+  set_col_bg();
+  gfx_rect(kx, piano_y, 1, wk_h);
+  i += 1;
+);
+set_col_bg();
+gfx_rect(piano_x + white_keys*wk_w, piano_y, 1, wk_h);
+gfx_rect(piano_x, piano_y + wk_h - 1, white_keys*wk_w, 1);
+
+// Black keys  (C#=1,D#=3,F#=6,G#=8,A#=10)
+bk_w = floor(wk_w * 0.6);
+bk_h = floor(wk_h * 0.62);
+function black_pc(bi) (
+  bi == 0 ? 1 :
+  bi == 1 ? 3 :
+  bi == 2 ? 6 :
+  bi == 3 ? 8 :
+             10;
+);
+function black_x_offset(bi) (
+  bi == 0 ? 0 :
+  bi == 1 ? 1 :
+  bi == 2 ? 3 :
+  bi == 3 ? 4 :
+             5;
+);
+
+i = 0;
+loop(5,
+  pc = black_pc(i);
+  wx = black_x_offset(i);
+  kx = piano_x + (wx + 1) * wk_w - floor(bk_w/2);
+
+  in_scale_v = mem[700 + ((pc + root_now) % 12)];
+  is_root_v  = (pc == 0);
+
+  in_scale_v ? (
+    set_col_accent();
+    gfx_a = 0.85;
+  ) : (
+    gfx_r=0.12; gfx_g=0.12; gfx_b=0.15; gfx_a=1;
+  );
+  gfx_rect(kx, piano_y, bk_w, bk_h);
+  i += 1;
+);
+
+// Piano legend
+gfx_setfont(1, "Arial", 9, 0);
+set_col_dim();
+gfx_x = piano_x; gfx_y = piano_y + piano_h + 3;
+gfx_drawstr("C"); gfx_x = piano_x + wk_w;
+gfx_drawstr("D"); gfx_x = piano_x + 2*wk_w;
+gfx_drawstr("E"); gfx_x = piano_x + 3*wk_w;
+gfx_drawstr("F"); gfx_x = piano_x + 4*wk_w;
+gfx_drawstr("G"); gfx_x = piano_x + 5*wk_w;
+gfx_drawstr("A"); gfx_x = piano_x + 6*wk_w;
+gfx_drawstr("B");
+
+// ---- Info panel -------------------------------------------
+info_y = piano_y + piano_h + 22;
+
+// Scale name display
+scale_names = "Major|Natural Minor|Harmonic Minor|Melodic Minor|Dorian|Phrygian|Lydian|Mixolydian|Locrian|Pentatonic Maj|Pentatonic Min|Blues|Whole Tone|Diminished WH|Chromatic";
+root_names  = "C|C#/Db|D|D#/Eb|E|F|F#/Gb|G|G#/Ab|A|A#/Bb|B";
+
+set_col_panel();
+gfx_rect(16, info_y, W-32, 56);
+set_col_accent();
+gfx_rect(16, info_y, 3, 56);
+
+gfx_setfont(1, "Arial", 13, 'b');
+set_col_text();
+gfx_x = 26; gfx_y = info_y + 8;
+gfx_drawstr("Key: ");
+set_col_accent();
+gfx_x = 66;
+
+// Print root name
+gfx_drawstr(root_names, root_now + 1, root_now + 1);
+
+set_col_text();
+gfx_x += 6;
+gfx_drawstr(" — ");
+gfx_x += 4;
+
+// Print scale name
+set_col_green();
+gfx_drawstr(scale_names, scale_now + 1, scale_now + 1);
+
+// Last note row
+gfx_setfont(1, "Arial", 11, 0);
+set_col_dim();
+gfx_x = 26; gfx_y = info_y + 32;
+gfx_drawstr("In: ");
+set_col_text();
+last_in  = floor(slider7 + 0.5);
+last_out = floor(slider8 + 0.5);
+note_name_raw = last_in % 12;
+octave_raw    = floor(last_in / 12) - 1;
+gfx_drawnumber(last_in, 0);
+gfx_drawstr("  |  ");
+set_col_dim();
+gfx_drawstr("Snapped: ");
+set_col_accent();
+gfx_drawnumber(last_out, 0);
+
+snapped_flag = (last_out != last_in);
+snapped_flag ? (
+  set_col_red();
+  gfx_x += 8;
+  gfx_drawstr("*");
+);
+
+// ---- Snap direction / channel row -------------------------
+dir_y = info_y + 62;
+gfx_setfont(1, "Arial", 11, 0);
+set_col_dim();
+gfx_x = 16; gfx_y = dir_y;
+gfx_drawstr("Snap: ");
+set_col_text();
+snap_dir_now = floor(slider3 + 0.5);
+snap_dir_now == 0 ? gfx_drawstr("Nearest") :
+snap_dir_now == 1 ? gfx_drawstr("Always Up") :
+                    gfx_drawstr("Always Down");
+
+gfx_x = 140; gfx_y = dir_y;
+set_col_dim();
+gfx_drawstr("  Ch: ");
+set_col_text();
+ch_filt_now = floor(slider4 + 0.5);
+ch_filt_now == 0 ? gfx_drawstr("All") : (
+  gfx_drawnumber(ch_filt_now, 0);
+);
+
+gfx_x = 260; gfx_y = dir_y;
+set_col_dim();
+gfx_drawstr("  Max Snap: ");
+set_col_text();
+mdist_now = floor(slider6 + 0.5);
+mdist_now == 0 ? gfx_drawstr("Unlimited") : (
+  gfx_drawnumber(mdist_now, 0);
+  gfx_drawstr(" st");
+);
+
+// ---- Footer -----------------------------------------------
+gfx_setfont(1, "Arial", 9, 0);
+set_col_dim();
+gfx_x = 16; gfx_y = H - 16;
+gfx_drawstr("ReaAutoMIDITune v1.0.1  |  FalconEYE Software Dev  |  Highlighted keys = in-scale  |  Bright = Root");
