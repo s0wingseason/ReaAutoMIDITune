@@ -5,7 +5,7 @@
 ; ============================================================
 
 !define APP_NAME        "ReaAutoMIDITune"
-!define APP_VERSION     "1.0.1"
+!define APP_VERSION     "1.0.2"
 !define APP_PUBLISHER   "FalconEYE Software Dev"
 !define APP_URL         "https://github.com/FalconEYE"
 !define JSFX_FILENAME   "ReaAutoMIDITune.jsfx"

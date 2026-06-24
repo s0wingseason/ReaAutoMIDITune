@@ -1,10 +1,10 @@
 desc:ReaAutoMIDITune - MIDI Key Snap
 tags: MIDI pitch correction key scale
 author: FalconEYE Software Dev
-version: 1.0.1
+version: 1.0.2
 
 // ============================================================
-//  ReaAutoMIDITune v1.0.1
+//  ReaAutoMIDITune v1.0.2
 //  Real-time MIDI note snapping to user-selected key/scale.
 //  Incoming notes outside the key are transparently remapped
 //  to the nearest in-scale pitch before being forwarded.
@@ -137,16 +137,22 @@ function load_scales() local(b) (
 
 load_scales();
 
-// Active note tracking: mem[500..627] = 128 slots for channel remapping
-// mem[500 + orig_note] = snapped note (-1 if not active)
+// Active note tracking: per-channel, per-note map to prevent multi-channel
+// collisions when the same note number is held on two different channels.
+// Layout: mem[500 + channel*128 + note] = snapped_note  (-1 = inactive)
+// Channels 0-15, notes 0-127 => 2048 slots: mem[500..2547]
 function init_note_map() local(i) (
   i = 0;
-  loop(128,
+  loop(2048,
     mem[500 + i] = -1;
     i += 1;
   );
 );
 init_note_map();
+
+// Helpers to read/write the per-channel note map
+function note_map_get(ch, note)  ( mem[500 + ch*128 + note]; );
+function note_map_set(ch, note, val) ( mem[500 + ch*128 + note] = val; );
 
 // ---- Snap engine -------------------------------------------
 // Returns the nearest in-scale note to raw_note given root & scale.
@@ -195,10 +201,7 @@ function snap_note(raw_note, root, scale_idx, snap_dir, max_dist)
           step = mem[base + i];
           o = abs_oct - 1;
           loop(3,
-            // Candidate: find the octave that places (root + step) nearest the
-            // raw note.  We anchor on the root's position in that octave.
             candidate_note = root + o * 12 + step;
-            // Adjust so candidate sits in the right chromatic position
             candidate_note >= 0 && candidate_note <= 127 ? (
               dist = abs(candidate_note - raw_note);
               dist < best_dist ? (
@@ -210,6 +213,10 @@ function snap_note(raw_note, root, scale_idx, snap_dir, max_dist)
           );
           i += 1;
         );
+        // FIX (v1.0.2): if all in-range candidates were filtered (edge of
+        // MIDI range with sparse scale), fall back to raw note rather than
+        // silently clamping to 0.
+        best_note == -1 ? best_note = raw_note;
       ) : snap_dir == 1 ? (
         // Always Up: nearest scale tone >= raw_note
         best_dist = 999;
@@ -285,6 +292,34 @@ s_ch_filt = floor(slider4 + 0.5);
 s_bypass  = floor(slider5 + 0.5);
 s_maxdist = floor(slider6 + 0.5);
 
+// FIX (v1.0.2): Bypass-mid-note protection.
+// When bypass is toggled ON, walk the full note map and send Note-Off
+// for every channel/note that has a snapped pitch stored, then clear
+// the slot.  This prevents snapped pitches from hanging when the user
+// enables bypass while notes are physically held.
+//
+// We detect the rising edge of the bypass flag via prev_bypass (0 on first
+// run, then tracks the previous block's value).  A dedicated variable
+// is safe in @block because JSFX global variables persist across blocks.
+prev_bypass == 0 && s_bypass == 1 ? (
+  // Rising edge: bypass just turned ON — flush all held notes
+  _ch = 0;
+  loop(16,
+    _n = 0;
+    loop(128,
+      _stored = note_map_get(_ch, _n);
+      _stored >= 0 ? (
+        // Send Note Off (status $x80 | channel) for the snapped pitch
+        midisend(0, $x80 | _ch, _stored, 0);
+        note_map_set(_ch, _n, -1);
+      );
+      _n += 1;
+    );
+    _ch += 1;
+  );
+);
+prev_bypass = s_bypass;
+
 while (midirecv(offset, msg1, msg2, msg3)) (
 
   status  = msg1 & $xF0;
@@ -302,8 +337,8 @@ while (midirecv(offset, msg1, msg2, msg3)) (
       raw_note = msg2;
       snapped  = snap_note(raw_note, s_root, s_scale, s_dir, s_maxdist);
 
-      // Store mapping so Note Off can follow the same pitch
-      mem[500 + raw_note] = snapped;
+      // Store mapping (per channel) so Note Off can release the right pitch
+      note_map_set(channel, raw_note, snapped);
 
       // Update display sliders
       slider7 = raw_note;
@@ -314,11 +349,11 @@ while (midirecv(offset, msg1, msg2, msg3)) (
       midisend(offset, msg1, snapped, msg3);
 
     ) : (status == $x80 || (status == $x90 && msg3 == 0)) ? (
-      // Note Off — resolve through stored map so we release the right pitch
+      // Note Off — resolve per-channel stored map
       raw_note = msg2;
-      stored   = mem[500 + raw_note];
+      stored   = note_map_get(channel, raw_note);
       stored   = (stored < 0) ? raw_note : stored;
-      mem[500 + raw_note] = -1; // clear slot
+      note_map_set(channel, raw_note, -1); // clear slot
 
       midisend(offset, msg1, stored, msg3);
 
@@ -361,7 +396,7 @@ gfx_drawstr("ReaAutoMIDITune");
 gfx_setfont(1, "Arial", 11, 0);
 set_col_dim();
 gfx_x = 220; gfx_y = 18;
-gfx_drawstr("MIDI Key-Snap by FalconEYE  v1.0");
+gfx_drawstr("MIDI Key-Snap by FalconEYE  v1.0.2");
 
 // Bypass indicator top-right
 bypass_now = floor(slider5 + 0.5);
@@ -421,8 +456,8 @@ loop(white_keys,
   pc = white_pc(i);
   kx = piano_x + i * wk_w;
 
-  in_scale_v = mem[700 + ((pc + root_now) % 12)];
-  is_root_v  = (pc == 0); // root at pc=0 relative
+  in_scale_v = mem[700 + ((pc - root_now + 12) % 12)];
+  is_root_v  = (pc == root_now); // highlight the actual selected root
 
   in_scale_v && is_root_v ? (
     // Root note — vivid accent
@@ -467,12 +502,15 @@ loop(5,
   wx = black_x_offset(i);
   kx = piano_x + (wx + 1) * wk_w - floor(bk_w/2);
 
-  in_scale_v = mem[700 + ((pc + root_now) % 12)];
-  is_root_v  = (pc == 0);
+  in_scale_v = mem[700 + ((pc - root_now + 12) % 12)];
+  is_root_v  = (pc == root_now); // highlight the actual selected root
 
-  in_scale_v ? (
+  in_scale_v && is_root_v ? (
     set_col_accent();
-    gfx_a = 0.85;
+    gfx_a = 0.85; // root black key — vivid accent
+  ) : in_scale_v ? (
+    set_col_accent();
+    gfx_a = 0.55; // in-scale black key — dimmed accent
   ) : (
     gfx_r=0.12; gfx_g=0.12; gfx_b=0.15; gfx_a=1;
   );
@@ -582,4 +620,4 @@ mdist_now == 0 ? gfx_drawstr("Unlimited") : (
 gfx_setfont(1, "Arial", 9, 0);
 set_col_dim();
 gfx_x = 16; gfx_y = H - 16;
-gfx_drawstr("ReaAutoMIDITune v1.0.1  |  FalconEYE Software Dev  |  Highlighted keys = in-scale  |  Bright = Root");
+gfx_drawstr("ReaAutoMIDITune v1.0.2  |  FalconEYE Software Dev  |  Highlighted keys = in-scale  |  Bright = Root");
